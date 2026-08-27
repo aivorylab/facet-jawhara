@@ -1,0 +1,43 @@
+name: Refresh dashboard data
+
+# This workflow only refreshes data.json and pushes it back to the repo.
+# GitHub Pages (once enabled to serve from the main branch — see README) picks up the
+# change automatically within a minute or two. No separate deploy step needed.
+
+on:
+  schedule:
+    # Every 6 hours. Adjust to taste — e.g. '0 6 * * *' for once daily at 06:00 UTC.
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}   # lets you trigger a refresh manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Refresh data.json from Windsor.ai
+        env:
+          WINDSOR_API_KEY: ${{ secrets.WINDSOR_API_KEY }}
+        run: python scripts/refresh_data.py
+
+      - name: Commit updated data.json (if changed)
+        run: |
+          git config user.name "facet-auto-refresh"
+          git config user.email "actions@github.com"
+          if git diff --quiet -- data.json; then
+            echo "No data changes — skipping commit."
+          else
+            git add data.json
+            git commit -m "Auto-refresh dashboard data [skip ci]"
+            git push
+          fi
