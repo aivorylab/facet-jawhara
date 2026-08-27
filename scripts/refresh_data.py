@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timedelta, timezone
 
 WINDSOR_BASE = "https://connectors.windsor.ai"
@@ -42,7 +43,14 @@ ACCOUNTS = {
 
 
 def windsor_get(connector, fields, date_preset="last_30d", extra_params=None):
-    """Real GET call against Windsor.ai's REST API. Returns parsed JSON (list of rows)."""
+    """Real GET call against Windsor.ai's REST API. Returns a list of row-dicts.
+
+    Windsor.ai's REST responses can come back either as a bare JSON array, or wrapped in an
+    object (commonly {"data": [...]} or similar, depending on account/connector). Iterating
+    over a wrapped dict without unwrapping it first iterates over its string KEYS instead of
+    row objects — which is exactly what produced the "'str' object has no attribute 'get'"
+    and the bare "0" (a KeyError on integer index 0) failures. This handles both shapes.
+    """
     if not API_KEY:
         raise RuntimeError("WINDSOR_API_KEY is not set — see README for how to add it as a GitHub Secret.")
     params = {
@@ -54,9 +62,25 @@ def windsor_get(connector, fields, date_preset="last_30d", extra_params=None):
         params.update(extra_params)
     url = f"{WINDSOR_BASE}/{connector}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"User-Agent": "facet-refresh-script/1.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = resp.read().decode("utf-8")
-    return json.loads(body)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        # Surface the response body too — Windsor.ai's 400 responses usually explain which
+        # field or parameter was rejected, which a bare "HTTP Error 400" hides.
+        detail = e.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"HTTP {e.code} for connector={connector}: {detail}") from None
+
+    parsed = json.loads(body)
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for key in ("data", "rows", "result", "results"):
+            if key in parsed and isinstance(parsed[key], list):
+                return parsed[key]
+        # Nothing recognizable — surface the actual shape rather than silently misreading it.
+        raise RuntimeError(f"Unexpected response shape for connector={connector}: keys={list(parsed.keys())}")
+    raise RuntimeError(f"Unexpected response type for connector={connector}: {type(parsed)}")
 
 
 def safe_num(v, default=0):
@@ -123,34 +147,58 @@ def refresh_platform_daily(data):
 
 
 def refresh_ga4_daily(data):
-    """Refreshes GA4's website performance and revenue series."""
-    rows = windsor_get("googleanalytics4", ["date", "sessions", "active_users", "conversions_purchase",
-                                             "total_revenue", "bounce_rate", "engagement_rate",
-                                             "average_session_duration", "screen_page_views"])
-    out = []
-    for r in rows:
-        out.append({
+    """Refreshes GA4's website performance and revenue series.
+
+    Split into two independently-guarded calls (rather than one call with 9 fields) so that
+    if one set of field names is wrong for your account, it doesn't take down the other —
+    each prints its own failure and the function still returns whatever succeeded.
+    """
+    if "ga4" not in data:
+        data["ga4"] = {}
+
+    # Core sessions/purchases/revenue series — kept to the field names already confirmed
+    # working for this account. If your account rejects "total_revenue", try
+    # "purchase_revenue" or "ecommerce_purchase_revenue" instead — check your available
+    # fields for the googleanalytics4 connector in your Windsor.ai dashboard.
+    try:
+        rows = windsor_get("googleanalytics4", ["date", "sessions", "active_users",
+                                                  "conversions_purchase", "total_revenue"])
+        out = [{
             "date": r.get("date"), "sessions": safe_num(r.get("sessions")),
             "active_users": safe_num(r.get("active_users")), "purchases": safe_num(r.get("conversions_purchase")),
             "revenue": safe_num(r.get("total_revenue")),
-        })
-    if "ga4" not in data:
-        data["ga4"] = {}
-    data["ga4"]["daily"] = out
-    print(f"  ga4.daily: {len(out)} rows refreshed")
+        } for r in rows]
+        data["ga4"]["daily"] = out
+        print(f"  ga4.daily: {len(out)} rows refreshed")
+    except Exception as e:
+        print(f"  ga4.daily FAILED ({e}) — retrying with a smaller, safer field set")
+        try:
+            rows = windsor_get("googleanalytics4", ["date", "sessions", "active_users", "conversions_purchase"])
+            out = [{
+                "date": r.get("date"), "sessions": safe_num(r.get("sessions")),
+                "active_users": safe_num(r.get("active_users")), "purchases": safe_num(r.get("conversions_purchase")),
+                "revenue": None,  # not refreshed this run — see the error above
+            } for r in rows]
+            data["ga4"]["daily"] = out
+            print(f"  ga4.daily: {len(out)} rows refreshed (revenue field skipped, see above)")
+        except Exception as e2:
+            print(f"  ga4.daily FAILED again ({e2}) — leaving previous data.json values in place")
 
-    perf = windsor_get("googleanalytics4", ["date", "bounce_rate", "engagement_rate",
-                                             "average_session_duration", "screen_page_views", "sessions"])
-    ga4_daily_perf = []
-    for r in perf:
-        ga4_daily_perf.append({
+    # Bounce rate / engagement / session duration / page views — separate call, separate
+    # failure boundary, since these field names are less certain than the ones above.
+    try:
+        perf = windsor_get("googleanalytics4", ["date", "bounce_rate", "engagement_rate",
+                                                  "average_session_duration", "screen_page_views", "sessions"])
+        ga4_daily_perf = [{
             "date": r.get("date"), "bounce_rate": safe_num(r.get("bounce_rate")),
             "engagement_rate": safe_num(r.get("engagement_rate")),
             "avg_session_duration": safe_num(r.get("average_session_duration")),
             "page_views": safe_num(r.get("screen_page_views")), "sessions": safe_num(r.get("sessions")),
-        })
-    data["ga4_daily_perf"] = ga4_daily_perf
-    print(f"  ga4_daily_perf: {len(ga4_daily_perf)} rows refreshed")
+        } for r in perf]
+        data["ga4_daily_perf"] = ga4_daily_perf
+        print(f"  ga4_daily_perf: {len(ga4_daily_perf)} rows refreshed")
+    except Exception as e:
+        print(f"  ga4_daily_perf FAILED ({e}) — leaving previous data.json values in place")
 
 
 def refresh_meta_totals(data):
