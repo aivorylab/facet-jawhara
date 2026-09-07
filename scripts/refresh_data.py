@@ -156,33 +156,46 @@ def refresh_ga4_daily(data):
     if "ga4" not in data:
         data["ga4"] = {}
 
-    # Core sessions/purchases/revenue series — kept to the field names already confirmed
-    # working for this account. If your account rejects "total_revenue", try
-    # "purchase_revenue" or "ecommerce_purchase_revenue" instead — check your available
-    # fields for the googleanalytics4 connector in your Windsor.ai dashboard.
-    try:
-        rows = windsor_get("googleanalytics4", ["date", "sessions", "active_users",
-                                                  "conversions_purchase", "total_revenue"])
-        out = [{
-            "date": r.get("date"), "sessions": safe_num(r.get("sessions")),
-            "active_users": safe_num(r.get("active_users")), "purchases": safe_num(r.get("conversions_purchase")),
-            "revenue": safe_num(r.get("total_revenue")),
-        } for r in rows]
-        data["ga4"]["daily"] = out
-        print(f"  ga4.daily: {len(out)} rows refreshed")
-    except Exception as e:
-        print(f"  ga4.daily FAILED ({e}) — retrying with a smaller, safer field set")
+    # Revenue field naming varies by Windsor.ai account/connector version. Rather than fail
+    # (and silently zero out revenue) on the first guess, try each candidate in turn and use
+    # whichever one actually returns data. "conversions_purchase" for purchase count has
+    # already been confirmed working for this account.
+    revenue_field_candidates = ["total_revenue", "purchase_revenue", "ecommerce_purchase_revenue",
+                                 "revenue", "total_purchase_revenue"]
+    daily_written = False
+    last_error = None
+    for revenue_field in revenue_field_candidates:
+        try:
+            rows = windsor_get("googleanalytics4", ["date", "sessions", "active_users",
+                                                      "conversions_purchase", revenue_field])
+            out = [{
+                "date": r.get("date"), "sessions": safe_num(r.get("sessions")),
+                "active_users": safe_num(r.get("active_users")), "purchases": safe_num(r.get("conversions_purchase")),
+                "revenue": safe_num(r.get(revenue_field)),
+            } for r in rows]
+            data["ga4"]["daily"] = out
+            print(f"  ga4.daily: {len(out)} rows refreshed (revenue field: {revenue_field})")
+            daily_written = True
+            break
+        except Exception as e:
+            last_error = e
+            print(f"  ga4.daily: revenue field '{revenue_field}' failed ({e}) — trying next candidate")
+
+    if not daily_written:
+        # Every revenue field candidate failed — fall back to sessions/purchases only, so the
+        # rest of the dashboard still refreshes rather than leaving completely stale data.
         try:
             rows = windsor_get("googleanalytics4", ["date", "sessions", "active_users", "conversions_purchase"])
             out = [{
                 "date": r.get("date"), "sessions": safe_num(r.get("sessions")),
                 "active_users": safe_num(r.get("active_users")), "purchases": safe_num(r.get("conversions_purchase")),
-                "revenue": None,  # not refreshed this run — see the error above
+                "revenue": None,  # every revenue field name tried above failed — see the errors above
             } for r in rows]
             data["ga4"]["daily"] = out
-            print(f"  ga4.daily: {len(out)} rows refreshed (revenue field skipped, see above)")
+            print(f"  ga4.daily: {len(out)} rows refreshed (ALL revenue field candidates failed — revenue skipped; "
+                  f"last error: {last_error}; add your account's real field name to revenue_field_candidates)")
         except Exception as e2:
-            print(f"  ga4.daily FAILED again ({e2}) — leaving previous data.json values in place")
+            print(f"  ga4.daily FAILED entirely ({e2}) — leaving previous data.json values in place")
 
     # Bounce rate / engagement / session duration / page views — separate call, separate
     # failure boundary, since these field names are less certain than the ones above.
