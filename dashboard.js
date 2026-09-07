@@ -12,8 +12,21 @@
    table were retrieved as full-period totals only — no daily breakdown
    exists for them, so they cannot be honestly recalculated per sub-range.
    ============================================================ */
-const DATA_WINDOW_START = '2026-07-14';
-const DATA_WINDOW_END   = '2026-08-12'; // most recent day with retrieved data — used as "today" for relative presets
+// The reporting window used to be hardcoded to the dates first pulled during setup. That broke
+// auto-refresh: new dates would land in data.json, but the dashboard would never look past the
+// fixed ceiling below. This now derives the real start/end from whatever dates are actually
+// present in the loaded data, so it advances automatically every time data.json is refreshed.
+function computeDataWindow(){
+  const dates = [];
+  (DATA.campaign_daily || []).forEach(r => { if (r.date) dates.push(r.date); });
+  (DATA.ga4 && DATA.ga4.daily || []).forEach(r => { if (r.date) dates.push(r.date); });
+  if (!dates.length) return { start: '2026-07-14', end: '2026-08-12' }; // fallback only if data is ever completely empty
+  dates.sort();
+  return { start: dates[0], end: dates[dates.length - 1] };
+}
+const _dataWindow = computeDataWindow();
+const DATA_WINDOW_START = _dataWindow.start;
+const DATA_WINDOW_END   = _dataWindow.end; // most recent day with retrieved data — used as "today" for relative presets
 function toDateObj(iso){ const [y,m,d]=iso.split('-').map(Number); return new Date(Date.UTC(y,m-1,d)); }
 function toISO(d){ return d.toISOString().slice(0,10); }
 function addDays(iso, n){ const d=toDateObj(iso); d.setUTCDate(d.getUTCDate()+n); return toISO(d); }
