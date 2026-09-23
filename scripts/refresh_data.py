@@ -160,7 +160,10 @@ def refresh_ga4_daily(data):
     # (and silently zero out revenue) on the first guess, try each candidate in turn and use
     # whichever one actually returns data. "conversions_purchase" for purchase count has
     # already been confirmed working for this account.
-    revenue_field_candidates = ["total_revenue", "purchase_revenue", "ecommerce_purchase_revenue",
+    # Confirmed for this account: Windsor.ai's field is "purchase_revenue" (GA4's own UI calls
+    # this same metric "Total revenue" — different name, same number). Put first so every
+    # scheduled run succeeds on the first try instead of failing on "total_revenue" every time.
+    revenue_field_candidates = ["purchase_revenue", "total_revenue", "ecommerce_purchase_revenue",
                                  "revenue", "total_purchase_revenue"]
     daily_written = False
     last_error = None
@@ -237,6 +240,39 @@ def refresh_meta_totals(data):
         print("  meta.totals refreshed")
 
 
+def refresh_meta_google_daily(data):
+    """Refreshes meta.daily and google.daily — separate, account-level daily arrays that the
+    Platform Comparison cards and the Meta/Google Ads pages' KPIs read from directly. This is
+    NOT the same array as campaign_daily (which is campaign-level and unified across all four
+    platforms) — missing this update was a real bug: campaign_daily could be fully refreshed
+    while these two stayed stale, silently showing AED 0 spend on any date range that extended
+    past whichever day these arrays last had data.
+    """
+    try:
+        rows = windsor_get("facebook", ["date", "spend", "impressions", "reach", "clicks",
+                                         "actions_purchase", "action_values_purchase"])
+        new_rows = [{"date": r.get("date"), "spend": safe_num(r.get("spend")),
+                     "impressions": safe_num(r.get("impressions")), "reach": safe_num(r.get("reach")),
+                     "clicks": safe_num(r.get("clicks")), "purchases": safe_num(r.get("actions_purchase")),
+                     "revenue": safe_num(r.get("action_values_purchase"))} for r in rows]
+        new_dates = set(r["date"] for r in new_rows)
+        data.setdefault("meta", {})["daily"] = [r for r in data.get("meta", {}).get("daily", []) if r["date"] not in new_dates] + new_rows
+        print(f"  meta.daily: {len(new_rows)} rows refreshed")
+    except Exception as e:
+        print(f"  meta.daily FAILED ({e}) — leaving previous data.json values in place")
+
+    try:
+        rows = windsor_get("google_ads", ["date", "spend", "impressions", "clicks", "conversions", "conversions_value"])
+        new_rows = [{"date": r.get("date"), "spend": safe_num(r.get("spend")),
+                     "impressions": safe_num(r.get("impressions")), "clicks": safe_num(r.get("clicks")),
+                     "purchases": safe_num(r.get("conversions")), "revenue": safe_num(r.get("conversions_value"))} for r in rows]
+        new_dates = set(r["date"] for r in new_rows)
+        data.setdefault("google", {})["daily"] = [r for r in data.get("google", {}).get("daily", []) if r["date"] not in new_dates] + new_rows
+        print(f"  google.daily: {len(new_rows)} rows refreshed")
+    except Exception as e:
+        print(f"  google.daily FAILED ({e}) — leaving previous data.json values in place")
+
+
 def main():
     if not os.path.exists(DATA_JSON_PATH):
         print(f"ERROR: {DATA_JSON_PATH} not found. Run this from the repo root, or check the path.", file=sys.stderr)
@@ -249,6 +285,7 @@ def main():
     steps = [
         ("Platform daily performance (Meta/Google/Snapchat/TikTok)", refresh_platform_daily),
         ("Meta account totals", refresh_meta_totals),
+        ("Meta/Google account-level daily arrays", refresh_meta_google_daily),
         ("GA4 daily performance", refresh_ga4_daily),
     ]
     failures = []
