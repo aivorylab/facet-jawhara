@@ -399,18 +399,18 @@ footer.appfoot{padding:30px 28px 60px;color:var(--text-faint);font-size:11.5px;b
           <option value="yesterday">Yesterday</option>
           <option value="last7">Last 7 Days</option>
           <option value="last14">Last 14 Days</option>
-          <option value="last30" selected>Last 30 Days (Jul 14 – Aug 12, 2026)</option>
+          <option value="last30" selected id="last30OptionLabel">Last 30 Days</option>
           <option value="thismonth">This Month</option>
           <option value="lastmonth">Last Month</option>
           <option value="custom">Custom Range…</option>
         </select>
       </div>
-      <div class="ctrl" id="customRangeCtrl" style="display:none;" title="Data is available from 14 Jul to 12 Aug 2026">
-        <input type="date" id="customFrom" min="2020-01-01" max="2030-12-31" value="2026-07-14">
+      <div class="ctrl" id="customRangeCtrl" style="display:none;">
+        <input type="date" id="customFrom" min="2020-01-01" max="2030-12-31">
         <span style="color:var(--text-faint);">–</span>
-        <input type="date" id="customTo" min="2020-01-01" max="2030-12-31" value="2026-08-12">
+        <input type="date" id="customTo" min="2020-01-01" max="2030-12-31">
         <button class="btn-refresh" id="applyCustomRange" style="padding:5px 10px;">Apply</button>
-        <span style="color:var(--amber);font-size:10.5px;margin-left:4px;white-space:nowrap;">Data available: 14 Jul – 12 Aug 2026 only</span>
+        <span id="dataAvailableHint" style="color:var(--amber);font-size:10.5px;margin-left:4px;white-space:nowrap;"></span>
       </div>
       <div class="ctrl" id="compCtrl">
         <span>⇄</span>
@@ -435,7 +435,7 @@ footer.appfoot{padding:30px 28px 60px;color:var(--text-faint);font-size:11.5px;b
     </div>
   </div>
   <div class="status-strip" id="statusStrip">
-    <span class="dot live"></span> Data last refreshed: 12 Aug 2026 &nbsp;·&nbsp; Reporting window: 14 Jul – 12 Aug 2026 (30 days)
+    <span class="dot live"></span> Loading current reporting window…
   </div>
 
   <div class="page-wrap" id="pageWrap"></div>
@@ -451,7 +451,7 @@ footer.appfoot{padding:30px 28px 60px;color:var(--text-faint);font-size:11.5px;b
       <span style="font-family:var(--serif);color:var(--gold);font-size:13px;">Facet</span>
       <span style="color:var(--text-faint);">by Aivory Lab</span>
     </div>
-    Jawhara Jewellery Media Buying Command Centre — cross-platform performance intelligence across Meta Ads, Google Ads, Snapchat Ads, TikTok Ads and GA4. Reporting window: 14 Jul – 12 Aug 2026 (last 30 days). Blended metrics are calculated from aggregated totals, never averaged. Figures shown in AED unless noted.
+    <span id="footerReportingWindow">Jawhara Jewellery Media Buying Command Centre — cross-platform performance intelligence across Meta Ads, Google Ads, Snapchat Ads, TikTok Ads and GA4. Blended metrics are calculated from aggregated totals, never averaged. Figures shown in AED unless noted.</span>
   </footer>
 </div>
 </div>
