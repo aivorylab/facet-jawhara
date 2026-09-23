@@ -16,17 +16,37 @@
 // auto-refresh: new dates would land in data.json, but the dashboard would never look past the
 // fixed ceiling below. This now derives the real start/end from whatever dates are actually
 // present in the loaded data, so it advances automatically every time data.json is refreshed.
+//
+// Important: this takes the OVERLAP between sources (the unified campaign_daily, GA4's daily
+// series, AND the separate per-platform Meta/Google daily arrays that the KPI cards read from),
+// not their union. Different Windsor.ai connectors — and even different daily arrays for the
+// same platform — can finish refreshing at different times; using the combined max would
+// extend the window into days where one source has real numbers and another genuinely has
+// none, showing a misleading "AED 0" instead of correctly stopping the window at the point
+// where every source actually has data.
 function computeDataWindow(){
-  const dates = [];
-  (DATA.campaign_daily || []).forEach(r => { if (r.date) dates.push(r.date); });
-  (DATA.ga4 && DATA.ga4.daily || []).forEach(r => { if (r.date) dates.push(r.date); });
-  if (!dates.length) return { start: '2026-07-14', end: '2026-08-12' }; // fallback only if data is ever completely empty
-  dates.sort();
-  return { start: dates[0], end: dates[dates.length - 1] };
+  const campaignDates = (DATA.campaign_daily || []).map(r => r.date).filter(Boolean);
+  const ga4Dates = (DATA.ga4 && DATA.ga4.daily || []).map(r => r.date).filter(Boolean);
+  const metaDailyDates = (DATA.meta && DATA.meta.daily || []).map(r => r.date).filter(Boolean);
+  const googleDailyDates = (DATA.google && DATA.google.daily || []).map(r => r.date).filter(Boolean);
+  const sources = [campaignDates, ga4Dates, metaDailyDates, googleDailyDates].filter(arr => arr.length > 0);
+  if (!sources.length) return { start: '2026-07-14', end: '2026-08-12' }; // fallback only if data is ever completely empty
+  const starts = sources.map(arr => arr.reduce((a, b) => (a < b ? a : b)));
+  const ends = sources.map(arr => arr.reduce((a, b) => (a > b ? a : b)));
+  const start = starts.reduce((a, b) => (a > b ? a : b)); // latest of the starts — safe lower bound
+  const end = ends.reduce((a, b) => (a < b ? a : b));     // earliest of the ends — safe upper bound, avoids the "AED 0" gap
+  if (start > end) {
+    // Sources don't actually overlap at all (shouldn't normally happen) — fall back to the
+    // widest span rather than an invalid inverted range.
+    return { start: starts.reduce((a, b) => (a < b ? a : b)), end: ends.reduce((a, b) => (a > b ? a : b)) };
+  }
+  return { start, end };
 }
 const _dataWindow = computeDataWindow();
 const DATA_WINDOW_START = _dataWindow.start;
-const DATA_WINDOW_END   = _dataWindow.end; // most recent day with retrieved data — used as "today" for relative presets
+const DATA_WINDOW_END   = _dataWindow.end; // most recent day where every data source has real data — used as "today" for relative presets
+const DATA_LAST_REFRESHED_LABEL = fmtDateShort(DATA_WINDOW_END); // shown in the "Data last refreshed" banners below, instead of a hardcoded date
+function fmtDateShort(iso){ const [y,m,d]=iso.split('-').map(Number); return new Date(Date.UTC(y,m-1,d)).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}); }
 function toDateObj(iso){ const [y,m,d]=iso.split('-').map(Number); return new Date(Date.UTC(y,m-1,d)); }
 function toISO(d){ return d.toISOString().slice(0,10); }
 function addDays(iso, n){ const d=toDateObj(iso); d.setUTCDate(d.getUTCDate()+n); return toISO(d); }
@@ -224,10 +244,10 @@ function platformTotals(metaAgg, googleAgg, snapAgg, tiktokAgg, isFullWindow){
       reach: null, reachNote: 'Google Ads does not report a comparable Reach metric for this account' },
     { key:'snapchat', name:'Snapchat Ads', dateFiltered:true, available: snapAgg.spend>0 || isFullWindow,
       spend:snapAgg.spend, impressions:snapAgg.impressions, clicks:snapAgg.clicks, purchases:snapAgg.purchases, revenue:snapAgg.revenue,
-      reach: isFullWindow ? (DATA.snapchat.totals.reach||null) : null, reachNote: 'Reach has no daily breakdown — only available for the full 14 Jul–12 Aug period' },
+      reach: isFullWindow ? (DATA.snapchat.totals.reach||null) : null, reachNote: `Reach has no daily breakdown — only available for the full ${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)} period` },
     { key:'tiktok', name:'TikTok Ads', dateFiltered:true, available: tiktokAgg.spend>0 || isFullWindow,
       spend:tiktokAgg.spend, impressions:tiktokAgg.impressions, clicks:tiktokAgg.clicks, purchases:tiktokAgg.purchases, revenue:tiktokAgg.revenue,
-      reach: isFullWindow ? (DATA.tiktok.totals.reach||null) : null, reachNote: 'Reach has no daily breakdown — only available for the full 14 Jul–12 Aug period' },
+      reach: isFullWindow ? (DATA.tiktok.totals.reach||null) : null, reachNote: `Reach has no daily breakdown — only available for the full ${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)} period` },
   ];
   rows.forEach(r=>{
     r.ctr = safeDiv(r.clicks, r.impressions); r.cpc = safeDiv(r.spend, r.clicks); r.cpm = r.impressions ? 1000*r.spend/r.impressions : null;
@@ -379,14 +399,14 @@ function rangeUnavailableMessage(){
   if (!r) return '';
   const reqFrom = r.requestedFrom ? fmtDate(r.requestedFrom) : '';
   const reqTo = r.requestedTo ? fmtDate(r.requestedTo) : '';
-  return `Data is not available for this reporting range${reqFrom?` (${reqFrom} – ${reqTo})`:''}. Please try another date range. Data is currently available for 14 Jul – 12 Aug 2026.`;
+  return `Data is not available for this reporting range${reqFrom?` (${reqFrom} – ${reqTo})`:''}. Please try another date range. Data is currently available for ${fmtDate(DATA_WINDOW_START)} – ${fmtDate(DATA_WINDOW_END)}.`;
 }
 
 /* Strict rule: campaign/audience/creative/product/budget tables (and Snapchat/TikTok in
    full) have no daily breakdown, so a sub-range request never substitutes the full-period
    numbers for them — it shows this explicit message instead, exactly as required. */
 function unavailableBlock(sectionLabel){
-  return `<div class="error-banner"><span class="ic">⚠</span><div><b>Data is not available for this reporting range.</b> ${sectionLabel} was retrieved only for the full 14 Jul – 12 Aug 2026 period and has no day-level breakdown, so it cannot be shown for a custom sub-range. Select <b>Last 30 Days</b> to view this section.</div></div>`;
+  return `<div class="error-banner"><span class="ic">⚠</span><div><b>Data is not available for this reporting range.</b> ${sectionLabel} was retrieved only for the full ${fmtDate(DATA_WINDOW_START)} – ${fmtDate(DATA_WINDOW_END)} period and has no day-level breakdown, so it cannot be shown for a custom sub-range. Select <b>Last 30 Days</b> to view this section.</div></div>`;
 }
 function fullPeriodOnlyBanner(){
   if (!RANGE || !RANGE.available || ISFULL) return '';
@@ -487,7 +507,7 @@ function rerenderAllFresh(){
     const banner = document.createElement('div');
     banner.className = 'error-banner';
     banner.style.marginBottom = '20px';
-    banner.innerHTML = `<span class="ic">⚠</span><div><b>${rangeUnavailableMessage()}</b><br>The figures shown below are still from your last valid selection (${RANGE_LAST_VALID_LABEL||'14 Jul – 12 Aug 2026'}) — nothing has updated because the range you just chose has no data to show.</div>`;
+    banner.innerHTML = `<span class="ic">⚠</span><div><b>${rangeUnavailableMessage()}</b><br>The figures shown below are still from your last valid selection (${RANGE_LAST_VALID_LABEL||(fmtDate(DATA_WINDOW_START)+' – '+fmtDate(DATA_WINDOW_END))}) — nothing has updated because the range you just chose has no data to show.</div>`;
     pageEl.insertBefore(banner, pageEl.firstChild);
   }
   applyLightPreviewTheme(currentPageId); // .main class persists across re-renders, but the switcher's own DOM is rebuilt — re-sync its active button
@@ -1088,7 +1108,7 @@ PAGES.exec = {
     const topROAS = [...conversionCamps].filter(c=>c.purchases>0).sort((a,b)=>(b.roas||0)-(a.roas||0)).slice(0,5);
     const bestTraffic = [...trafficCamps].filter(c=>c.cpc!=null).sort((a,b)=>a.cpc-b.cpc).slice(0,5);
     const bestAwareness = [...awarenessCamps].filter(c=>c.cpm!=null).sort((a,b)=>a.cpm-b.cpm).slice(0,5);
-    const rangeLabel = RANGE.available ? `${fmtDate(RANGE.from)} – ${fmtDate(RANGE.to)}` : '14 Jul – 12 Aug 2026';
+    const rangeLabel = RANGE.available ? `${fmtDate(RANGE.from)} – ${fmtDate(RANGE.to)}` : `${fmtDate(DATA_WINDOW_START)} – ${fmtDate(DATA_WINDOW_END)}`;
     const spendTrend = (metaSpendTrend!=null && googleSpendTrend!=null) ? (metaSpendTrend+googleSpendTrend)/2 : null;
     let spendDelta = spendTrend, spendDeltaLabel = 'vs first half of window';
     let revDelta = ga4RevTrend, revDeltaLabel = 'vs first half of window';
@@ -1105,7 +1125,7 @@ PAGES.exec = {
       <div class="page-desc">Blended performance across Meta, Google, Snapchat and TikTok, plus GA4 website revenue — ${rangeLabel}.</div>
     </div>
 
-    <div class="banner warn"><span class="ic">ℹ</span><div><b>Data last refreshed: 12 Aug 2026.</b> Reporting window: <b>${rangeLabel}</b>.${appState.compare!=='none' ? (COMPARE.available ? ` Comparing against ${COMPARE.label.toLowerCase()} (${fmtDate(COMPARE.from)} – ${fmtDate(COMPARE.to)}).` : ` <span style="color:var(--amber)">${appState.compare==='prevyear' ? 'Previous-year data has not been retrieved in this build — comparison unavailable.' : 'The comparison period falls outside the retrieved data — comparison unavailable.'}</span>`) : ' Trend arrows compare the second half of this window vs the first half.'}</div></div>
+    <div class="banner warn"><span class="ic">ℹ</span><div><b>Data last refreshed: ${DATA_LAST_REFRESHED_LABEL}.</b> Reporting window: <b>${rangeLabel}</b>.${appState.compare!=='none' ? (COMPARE.available ? ` Comparing against ${COMPARE.label.toLowerCase()} (${fmtDate(COMPARE.from)} – ${fmtDate(COMPARE.to)}).` : ` <span style="color:var(--amber)">${appState.compare==='prevyear' ? 'Previous-year data has not been retrieved in this build — comparison unavailable.' : 'The comparison period falls outside the retrieved data — comparison unavailable.'}</span>`) : ' Trend arrows compare the second half of this window vs the first half.'}</div></div>
     ${partialRangeBanner()}
 
     ${sectionLabel('Headline numbers')}
@@ -2762,7 +2782,7 @@ PAGES.budget = {
     </div>
     ${BREAKDOWNS_AVAILABLE ? `
     <div class="card">
-      <div class="card-head"><div><div class="card-title">Meta — Ad Sets With a Retrieved Daily Budget</div><div class="card-sub">Full-period (14 Jul–12 Aug) spend against the ad set's current daily budget × 30 — no daily breakdown exists for these budget rows, so this table does not change with the date filter.</div></div><span class="tag warn">Full period only</span></div>
+      <div class="card-head"><div><div class="card-title">Meta — Ad Sets With a Retrieved Daily Budget</div><div class="card-sub">Full-period (${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)}) spend against the ad set's current daily budget × 30 — no daily breakdown exists for these budget rows, so this table does not change with the date filter.</div></div><span class="tag warn">Full period only</span></div>
       <div class="table-scroll"><table><thead><tr><th style="width:39.47%">Campaign / Ad Set</th><th class="num-col" style="width:15.13%">Daily Budget</th><th class="num-col" style="width:15.13%">Implied 30d Budget</th><th class="num-col" style="width:15.13%">Actual 30d Spend</th><th class="num-col" style="width:15.13%">Pacing</th></tr></thead><tbody>
         ${b.map(r=>{
           const implied = r.adset_daily_budget*30;
@@ -2934,7 +2954,7 @@ function updateStatusStrip(){
   const strip = document.getElementById('statusStrip');
   if (!strip) return;
   if (RANGE && RANGE.available){
-    strip.innerHTML = `<span class="dot live"></span> Data last refreshed: 12 Aug 2026 &nbsp;·&nbsp; Reporting window: ${fmtDate(RANGE.from)} – ${fmtDate(RANGE.to)} (${RANGE.days} day${RANGE.days===1?'':'s'})${appState.platform!=='all' ? ' &nbsp;·&nbsp; Platform: '+({meta:'Meta Ads',google:'Google Ads',snapchat:'Snapchat Ads',tiktok:'TikTok Ads',ga4:'GA4 / Website'}[appState.platform]) : ''}`;
+    strip.innerHTML = `<span class="dot live"></span> Data last refreshed: ${DATA_LAST_REFRESHED_LABEL} &nbsp;·&nbsp; Reporting window: ${fmtDate(RANGE.from)} – ${fmtDate(RANGE.to)} (${RANGE.days} day${RANGE.days===1?'':'s'})${appState.platform!=='all' ? ' &nbsp;·&nbsp; Platform: '+({meta:'Meta Ads',google:'Google Ads',snapchat:'Snapchat Ads',tiktok:'TikTok Ads',ga4:'GA4 / Website'}[appState.platform]) : ''}`;
   } else {
     strip.innerHTML = `<span class="dot warn"></span> ${rangeUnavailableMessage()}`;
   }
@@ -2976,6 +2996,24 @@ document.getElementById('platformSel').addEventListener('change', function(){
 /* ============================================================
    BOOTSTRAP
    ============================================================ */
+// Populates the handful of static HTML elements (the "Last 30 Days" dropdown option label,
+// the custom-range date inputs and hint, the footer) that exist in index.html before this
+// script runs and therefore can't reference DATA_WINDOW_START/END directly — this keeps them
+// in sync with the real, dynamically-computed window instead of carrying a fixed date forever.
+function syncStaticDateReferences(){
+  const optLabel = document.getElementById('last30OptionLabel');
+  if (optLabel) optLabel.textContent = `Last 30 Days (${fmtDate(DATA_WINDOW_START)} – ${fmtDate(DATA_WINDOW_END)})`;
+  const rangeCtrl = document.getElementById('customRangeCtrl');
+  if (rangeCtrl) rangeCtrl.title = `Data is available from ${fmtDate(DATA_WINDOW_START)} to ${fmtDate(DATA_WINDOW_END)}`;
+  const hint = document.getElementById('dataAvailableHint');
+  if (hint) hint.textContent = `Data available: ${fmtDate(DATA_WINDOW_START)} – ${fmtDate(DATA_WINDOW_END)} only`;
+  const fromInput = document.getElementById('customFrom'), toInput = document.getElementById('customTo');
+  if (fromInput) fromInput.value = DATA_WINDOW_START;
+  if (toInput) toInput.value = DATA_WINDOW_END;
+  const footer = document.getElementById('footerReportingWindow');
+  if (footer) footer.textContent = `Jawhara Jewellery Media Buying Command Centre — cross-platform performance intelligence across Meta Ads, Google Ads, Snapchat Ads, TikTok Ads and GA4. Reporting window: ${fmtDate(DATA_WINDOW_START)} – ${fmtDate(DATA_WINDOW_END)}. Blended metrics are calculated from aggregated totals, never averaged. Figures shown in AED unless noted.`;
+}
+syncStaticDateReferences();
 buildNav();
 updateStatusStrip();
 renderPage('exec');
