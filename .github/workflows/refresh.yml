@@ -6,9 +6,11 @@ name: Refresh dashboard data
 
 on:
   schedule:
-    # Every 6 hours. Adjust to taste — e.g. '0 6 * * *' for once daily at 06:00 UTC.
-    - cron: '0 */6 * * *'
-  workflow_dispatch: {}   # lets you trigger a refresh manually from the Actions tab
+    # 10:30 IST daily. IST is UTC+5:30, and GitHub Actions cron always runs in UTC, so 10:30 IST
+    # = 05:00 UTC. If you ever need a different time, subtract 5 hours 30 minutes from the IST
+    # time you want and express that in UTC here.
+    - cron: '0 5 * * *'
+  workflow_dispatch: {}   # lets you trigger a refresh manually from the Actions tab, any time
 
 permissions:
   contents: write
