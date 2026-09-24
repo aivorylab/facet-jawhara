@@ -24,23 +24,55 @@
 // extend the window into days where one source has real numbers and another genuinely has
 // none, showing a misleading "AED 0" instead of correctly stopping the window at the point
 // where every source actually has data.
+// Per-platform "own" latest/earliest real date — independent of other platforms. This is what
+// makes Option B possible: the global window (below) can advance based on whichever platform is
+// freshest, while any page/card showing a specific platform's numbers can check its own real
+// coverage and disclose honestly when it falls short, instead of either (a) silently showing a
+// misleading zero for days it has no data, or (b) freezing the whole dashboard to the laggard.
+function computePlatformEndDates(){
+  const endOf = (dates) => dates.length ? dates.reduce((a,b)=>a>b?a:b) : null;
+  const startOf = (dates) => dates.length ? dates.reduce((a,b)=>a<b?a:b) : null;
+  const datesFor = (platformName, extraArr) => {
+    const dates = (DATA.campaign_daily||[]).filter(r=>r.platform===platformName).map(r=>r.date);
+    (extraArr||[]).forEach(r=>{ if (r.date) dates.push(r.date); });
+    return dates;
+  };
+  const ga4Dates = (DATA.ga4 && DATA.ga4.daily || []).map(r=>r.date);
+  const build = (dates) => ({ start: startOf(dates), end: endOf(dates) });
+  return {
+    Meta: build(datesFor('Meta', DATA.meta && DATA.meta.daily)),
+    Google: build(datesFor('Google', DATA.google && DATA.google.daily)),
+    Snapchat: build(datesFor('Snapchat', DATA.snapchat && DATA.snapchat.daily)),
+    TikTok: build(datesFor('TikTok', DATA.tiktok && DATA.tiktok.daily)),
+    GA4: build(ga4Dates),
+  };
+}
+const PLATFORM_WINDOWS = computePlatformEndDates();
+// Is `platformName`'s own real data missing for any part of the range ending at `to`? Used to
+// show an honest "data through {date}" note instead of a silent zero when a platform lags.
+function platformPartialForRange(platformName, to){
+  const w = PLATFORM_WINDOWS[platformName];
+  return !!(w && w.end && w.end < to);
+}
 function computeDataWindow(){
   const campaignDates = (DATA.campaign_daily || []).map(r => r.date).filter(Boolean);
   const ga4Dates = (DATA.ga4 && DATA.ga4.daily || []).map(r => r.date).filter(Boolean);
   const metaDailyDates = (DATA.meta && DATA.meta.daily || []).map(r => r.date).filter(Boolean);
   const googleDailyDates = (DATA.google && DATA.google.daily || []).map(r => r.date).filter(Boolean);
-  const sources = [campaignDates, ga4Dates, metaDailyDates, googleDailyDates].filter(arr => arr.length > 0);
+  const snapDailyDates = (DATA.snapchat && DATA.snapchat.daily || []).map(r => r.date).filter(Boolean);
+  const tiktokDailyDates = (DATA.tiktok && DATA.tiktok.daily || []).map(r => r.date).filter(Boolean);
+  const sources = [campaignDates, ga4Dates, metaDailyDates, googleDailyDates, snapDailyDates, tiktokDailyDates].filter(arr => arr.length > 0);
   if (!sources.length) return { start: '2026-07-14', end: '2026-08-12' }; // fallback only if data is ever completely empty
   const starts = sources.map(arr => arr.reduce((a, b) => (a < b ? a : b)));
   const ends = sources.map(arr => arr.reduce((a, b) => (a > b ? a : b)));
-  const start = starts.reduce((a, b) => (a > b ? a : b)); // latest of the starts — safe lower bound
-  const end = ends.reduce((a, b) => (a < b ? a : b));     // earliest of the ends — safe upper bound, avoids the "AED 0" gap
-  if (start > end) {
-    // Sources don't actually overlap at all (shouldn't normally happen) — fall back to the
-    // widest span rather than an invalid inverted range.
-    return { start: starts.reduce((a, b) => (a < b ? a : b)), end: ends.reduce((a, b) => (a > b ? a : b)) };
-  }
-  return { start, end };
+  // Option B: the global window now advances based on the FRESHEST platform (widest span), not
+  // the one lagging furthest behind — "Today"/"Yesterday" reflect real, current data from
+  // whichever platforms have it. A platform that hasn't caught up (e.g. Google's campaign going
+  // quiet) no longer freezes Meta/GA4's genuinely current numbers. The tradeoff — a lagging
+  // platform's real "no data yet" being distinguishable from a genuine zero-spend day — is
+  // handled by platformPartialForRange() and the coverage disclosures wired into the UI below,
+  // not by holding the whole dashboard back.
+  return { start: starts.reduce((a, b) => (a < b ? a : b)), end: ends.reduce((a, b) => (a > b ? a : b)) };
 }
 const _dataWindow = computeDataWindow();
 const DATA_WINDOW_START = _dataWindow.start;
@@ -235,19 +267,24 @@ function safeNewChart(ctx, cfg){
    Google's purchases/revenue also have no daily breakdown, so those two fields likewise stay
    at their full-period values whenever a sub-range is selected. */
 function platformTotals(metaAgg, googleAgg, snapAgg, tiktokAgg, isFullWindow){
+  const rangeTo = (typeof RANGE !== 'undefined' && RANGE.available) ? RANGE.to : DATA_WINDOW_END;
   const rows = [
     { key:'meta', name:'Meta Ads', dateFiltered:true,
       spend:metaAgg.spend, impressions:metaAgg.impressions, clicks:metaAgg.clicks, purchases:metaAgg.purchases, revenue:metaAgg.revenue,
-      reach: metaAgg.reach_avg || null, reachNote: 'Average daily reach for the selected range' },
+      reach: metaAgg.reach_avg || null, reachNote: 'Average daily reach for the selected range',
+      partial: platformPartialForRange('Meta', rangeTo), coverageEnd: PLATFORM_WINDOWS.Meta.end },
     { key:'google', name:'Google Ads', dateFiltered:true,
       spend:googleAgg.spend, impressions:googleAgg.impressions, clicks:googleAgg.clicks, purchases:googleAgg.purchases, revenue:googleAgg.revenue,
-      reach: null, reachNote: 'Google Ads does not report a comparable Reach metric for this account' },
+      reach: null, reachNote: 'Google Ads does not report a comparable Reach metric for this account',
+      partial: platformPartialForRange('Google', rangeTo), coverageEnd: PLATFORM_WINDOWS.Google.end },
     { key:'snapchat', name:'Snapchat Ads', dateFiltered:true, available: snapAgg.spend>0 || isFullWindow,
       spend:snapAgg.spend, impressions:snapAgg.impressions, clicks:snapAgg.clicks, purchases:snapAgg.purchases, revenue:snapAgg.revenue,
-      reach: isFullWindow ? (DATA.snapchat.totals.reach||null) : null, reachNote: `Reach has no daily breakdown — only available for the full ${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)} period` },
+      reach: isFullWindow ? (DATA.snapchat.totals.reach||null) : null, reachNote: `Reach has no daily breakdown — only available for the full ${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)} period`,
+      partial: platformPartialForRange('Snapchat', rangeTo), coverageEnd: PLATFORM_WINDOWS.Snapchat.end },
     { key:'tiktok', name:'TikTok Ads', dateFiltered:true, available: tiktokAgg.spend>0 || isFullWindow,
       spend:tiktokAgg.spend, impressions:tiktokAgg.impressions, clicks:tiktokAgg.clicks, purchases:tiktokAgg.purchases, revenue:tiktokAgg.revenue,
-      reach: isFullWindow ? (DATA.tiktok.totals.reach||null) : null, reachNote: `Reach has no daily breakdown — only available for the full ${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)} period` },
+      reach: isFullWindow ? (DATA.tiktok.totals.reach||null) : null, reachNote: `Reach has no daily breakdown — only available for the full ${fmtDate(DATA_WINDOW_START)}–${fmtDate(DATA_WINDOW_END)} period`,
+      partial: platformPartialForRange('TikTok', rangeTo), coverageEnd: PLATFORM_WINDOWS.TikTok.end },
   ];
   rows.forEach(r=>{
     r.ctr = safeDiv(r.clicks, r.impressions); r.cpc = safeDiv(r.spend, r.clicks); r.cpm = r.impressions ? 1000*r.spend/r.impressions : null;
@@ -265,6 +302,21 @@ function platformTotals(metaAgg, googleAgg, snapAgg, tiktokAgg, isFullWindow){
     blendedROAS: safeDiv(totalRevenue,totalSpend), blendedCPA: safeDiv(totalSpend,totalPurchases) };
 }
 
+/* Option B disclosure: when the global window has advanced based on the freshest platform(s),
+   a laggard's contribution to a blended total is real-but-incomplete for the tail of the range,
+   not a genuine zero. This surfaces that plainly on blended ("All Platforms") pages rather than
+   letting a silent shortfall be mistaken for the platform having no spend at all. */
+function coverageBannerHtml(rows, includeGA4){
+  const rangeTo = (typeof RANGE !== 'undefined' && RANGE.available) ? RANGE.to : DATA_WINDOW_END;
+  const partials = rows.filter(r => r.partial && r.coverageEnd);
+  if (includeGA4 && platformPartialForRange('GA4', rangeTo) && PLATFORM_WINDOWS.GA4.end) {
+    partials.push({ name:'GA4', coverageEnd: PLATFORM_WINDOWS.GA4.end });
+  }
+  if (!partials.length) return '';
+  const items = partials.map(r => `${r.name} (data through ${fmtDate(r.coverageEnd)})`).join(', ');
+  return `<div class="banner warn"><span class="ic">⚠</span><div><b>Partial data for this range:</b> ${items} — figures for the remaining days of the selected range aren't available yet, so blended totals below may understate the true figure until those platforms catch up.</div></div>`;
+}
+
 /* ============================================================
    MUTABLE STATE — recomputed whenever the date/comparison/platform
    filters change. Declared with `let` (not `const`) specifically so
@@ -272,7 +324,7 @@ function platformTotals(metaAgg, googleAgg, snapAgg, tiktokAgg, isFullWindow){
    as free variables, sees the latest recomputed values on re-render.
    ============================================================ */
 let appState = { preset:'last30', from:DATA_WINDOW_START, to:DATA_WINDOW_END, customFrom:DATA_WINDOW_START, customTo:DATA_WINDOW_END, compare:'none', platform:'all' };
-let RANGE, ISFULL, METAD, GOOGLED, GA4D, METAAGG, GOOGLEAGG, GA4AGG, SNAPAGG, TIKTOKAGG;
+let RANGE, ISFULL, METAD, GOOGLED, GA4D, SNAPD, TIKTOKD, METAAGG, GOOGLEAGG, GA4AGG, SNAPAGG, TIKTOKAGG;
 let RANGE_LAST_VALID_LABEL = null;
 let PT, GA4T, MER, AOV, CONVRATE;
 let GA4_BOUNCE_RATE, GA4_ENGAGEMENT_RATE, GA4_AVG_SESSION_DURATION, GA4_PAGES_PER_SESSION;
@@ -302,6 +354,8 @@ function recomputeAll(){
   METAD = filterDailyRows(DATA.meta.daily, from, to);
   GOOGLED = filterDailyRows(DATA.google.daily, from, to);
   GA4D = filterDailyRows(DATA.ga4.daily, from, to);
+  SNAPD = filterDailyRows(DATA.snapchat && DATA.snapchat.daily, from, to);
+  TIKTOKD = filterDailyRows(DATA.tiktok && DATA.tiktok.daily, from, to);
 
   const campaignDailyFiltered = filterCampaignDaily(from, to);
   CAMPAIGN_ROWS = aggregateCampaignDaily(campaignDailyFiltered);
@@ -317,18 +371,21 @@ function recomputeAll(){
   GOOGLEAGG.cpm = GOOGLEAGG.impressions ? 1000*GOOGLEAGG.spend/GOOGLEAGG.impressions : null;
   GOOGLEAGG.roas = safeDiv(GOOGLEAGG.revenue, GOOGLEAGG.spend); GOOGLEAGG.cpa = safeDiv(GOOGLEAGG.spend, GOOGLEAGG.purchases);
 
-  // Snapchat / TikTok platform totals — now computed from the same real daily campaign data,
-  // for any date range, not just the full 30-day window.
-  function platformAgg(platformName){
-    const rows = campaignDailyFiltered.filter(r=>r.platform===platformName);
+  // Snapchat / TikTok platform totals — same account-level daily pattern as Meta/Google above
+  // (real, unfiltered daily pulls that include genuine zero-spend days), so these two platforms'
+  // own freshness is tracked the same honest way instead of only advancing on days they happen
+  // to have campaign-level spend. Falls back to campaign_daily if the account-level array isn't
+  // present yet (e.g. before this fix's first scheduled run), so nothing breaks in the meantime.
+  function platformAgg(platformName, dailyRows){
+    const rows = (dailyRows && dailyRows.length) ? dailyRows : campaignDailyFiltered.filter(r=>r.platform===platformName);
     const agg = { spend:sumKey(rows,'spend'), clicks:sumKey(rows,'clicks'), impressions:sumKey(rows,'impressions'), purchases:sumKey(rows,'purchases'), revenue:sumKey(rows,'revenue') };
     agg.ctr = safeDiv(agg.clicks, agg.impressions); agg.cpc = safeDiv(agg.spend, agg.clicks);
     agg.cpm = agg.impressions ? 1000*agg.spend/agg.impressions : null;
     agg.roas = safeDiv(agg.revenue, agg.spend); agg.cpa = safeDiv(agg.spend, agg.purchases);
     return agg;
   }
-  SNAPAGG = platformAgg('Snapchat');
-  TIKTOKAGG = platformAgg('TikTok');
+  SNAPAGG = platformAgg('Snapchat', SNAPD);
+  TIKTOKAGG = platformAgg('TikTok', TIKTOKD);
 
   PT = platformTotals(METAAGG, GOOGLEAGG, SNAPAGG, TIKTOKAGG, ISFULL);
   GA4T = { sessions:GA4AGG.sessions, active_users:GA4AGG.active_users, purchases:GA4AGG.purchases, revenue:GA4AGG.revenue,
@@ -959,6 +1016,7 @@ function platformCompareCards(){
     if(r.key===mostRevenue.key) badges.push('<span class="mini-badge lead">Top revenue</span>');
     if(r.key===worstROAS.key && rows.length>1) badges.push('<span class="mini-badge watch">Needs attention</span>');
     if(!r.dateFiltered) badges.push(`<span class="mini-badge" style="background:rgba(124,156,181,0.15);color:var(--blue);">${ISFULL?'Full period':'Unavailable'}</span>`);
+    if(r.partial) badges.push(`<span class="mini-badge" style="background:rgba(217,168,92,0.15);color:var(--amber);" title="This platform's own real data doesn't yet reach the end of the selected range.">Data through ${fmtDate(r.coverageEnd)}</span>`);
     return `<div class="plat-card">
       <div class="plat-card-head">${platformLabel(r.key, r.name)}</div>
       <div class="plat-card-metrics">
@@ -989,6 +1047,7 @@ function platformCompareCardsExec(){
     if(highestSpend && r.key===highestSpend.key && r.key!==mostRevenue.key) badges.push('<span class="mini-badge" style="background:rgba(214,187,127,0.15);color:var(--gold);">Highest spend</span>');
     if(worstROAS && r.key===worstROAS.key && roasEligible.length>1 && worstROAS.key!==bestROAS.key) badges.push('<span class="mini-badge watch">Needs attention</span>');
     if(!r.dateFiltered) badges.push(`<span class="mini-badge" style="background:rgba(124,156,181,0.15);color:var(--blue);">${ISFULL?'Full period':'Unavailable'}</span>`);
+    if(r.partial) badges.push(`<span class="mini-badge" style="background:rgba(217,168,92,0.15);color:var(--amber);" title="This platform's own real data doesn't yet reach the end of the selected range.">Data through ${fmtDate(r.coverageEnd)}</span>`);
     return `<div class="plat-card">
       <div class="plat-card-head">${platformLabel(r.key, r.name)}</div>
       <div class="plat-card-metrics">
@@ -1127,6 +1186,7 @@ PAGES.exec = {
 
     <div class="banner warn"><span class="ic">ℹ</span><div><b>Data last refreshed: ${DATA_LAST_REFRESHED_LABEL}.</b> Reporting window: <b>${rangeLabel}</b>.${appState.compare!=='none' ? (COMPARE.available ? ` Comparing against ${COMPARE.label.toLowerCase()} (${fmtDate(COMPARE.from)} – ${fmtDate(COMPARE.to)}).` : ` <span style="color:var(--amber)">${appState.compare==='prevyear' ? 'Previous-year data has not been retrieved in this build — comparison unavailable.' : 'The comparison period falls outside the retrieved data — comparison unavailable.'}</span>`) : ' Trend arrows compare the second half of this window vs the first half.'}</div></div>
     ${partialRangeBanner()}
+    ${coverageBannerHtml(platformRows, true)}
 
     ${sectionLabel('Headline numbers')}
     <div class="kpi-grid">
@@ -1368,6 +1428,7 @@ PAGES.cross = {
       <div class="page-desc">Side-by-side comparison of delivery and efficiency across all connected ad platforms. Blended ratios are calculated from aggregated totals — never averaged from per-platform ratios.</div>
     </div>
     ${partialRangeBanner()}
+    ${coverageBannerHtml(PT.rows, false)}
     ${!ISFULL ? `<div class="range-banner"><span class="ic">ℹ</span><div>All four platforms below are recalculated for ${fmtDate(RANGE.from)} – ${fmtDate(RANGE.to)} from real daily campaign-level data.</div></div>` : ''}
     <div class="kpi-grid">
       ${kpi('Blended CTR', fmtPct(PT.blendedCTR,2))}
