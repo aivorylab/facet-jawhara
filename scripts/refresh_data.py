@@ -281,6 +281,40 @@ def refresh_meta_google_daily(data):
         print(f"  google.daily FAILED ({e}) — leaving previous data.json values in place")
 
 
+def refresh_snap_tiktok_daily(data):
+    """Refreshes snapchat.daily and tiktok.daily — account-level daily arrays, pulled WITHOUT a
+    spend filter so a genuine zero-spend day still gets a real row for that date. Without this,
+    each platform's "last known real date" only advances on days it happens to have spend in
+    campaign_daily (which is filtered to spend>0) — so a currently-inactive account looks
+    permanently stuck on whatever day it last spent something, rather than being confirmed as
+    checked (and genuinely at zero) every single day. This is what makes "Today" reflect a real,
+    checked-today zero rather than stale data from weeks ago.
+    """
+    try:
+        rows = windsor_get("snapchat", ["date", "spend", "impressions", "clicks",
+                                         "conversion_purchases", "conversion_purchases_value"])
+        new_rows = [{"date": r.get("date"), "spend": safe_num(r.get("spend")),
+                     "impressions": safe_num(r.get("impressions")), "clicks": safe_num(r.get("clicks")),
+                     "purchases": safe_num(r.get("conversion_purchases")),
+                     "revenue": safe_num(r.get("conversion_purchases_value"))} for r in rows]
+        new_dates = set(r["date"] for r in new_rows)
+        data.setdefault("snapchat", {})["daily"] = [r for r in data.get("snapchat", {}).get("daily", []) if r["date"] not in new_dates] + new_rows
+        print(f"  snapchat.daily: {len(new_rows)} rows refreshed")
+    except Exception as e:
+        print(f"  snapchat.daily FAILED ({e}) — leaving previous data.json values in place")
+
+    try:
+        rows = windsor_get("tiktok", ["date", "spend", "impressions", "clicks", "complete_payment"])
+        new_rows = [{"date": r.get("date"), "spend": safe_num(r.get("spend")),
+                     "impressions": safe_num(r.get("impressions")), "clicks": safe_num(r.get("clicks")),
+                     "purchases": safe_num(r.get("complete_payment")), "revenue": 0} for r in rows]
+        new_dates = set(r["date"] for r in new_rows)
+        data.setdefault("tiktok", {})["daily"] = [r for r in data.get("tiktok", {}).get("daily", []) if r["date"] not in new_dates] + new_rows
+        print(f"  tiktok.daily: {len(new_rows)} rows refreshed")
+    except Exception as e:
+        print(f"  tiktok.daily FAILED ({e}) — leaving previous data.json values in place")
+
+
 def main():
     if not os.path.exists(DATA_JSON_PATH):
         print(f"ERROR: {DATA_JSON_PATH} not found. Run this from the repo root, or check the path.", file=sys.stderr)
@@ -294,6 +328,7 @@ def main():
         ("Platform daily performance (Meta/Google/Snapchat/TikTok)", refresh_platform_daily),
         ("Meta account totals", refresh_meta_totals),
         ("Meta/Google account-level daily arrays", refresh_meta_google_daily),
+        ("Snapchat/TikTok account-level daily arrays", refresh_snap_tiktok_daily),
         ("GA4 daily performance", refresh_ga4_daily),
     ]
     failures = []
