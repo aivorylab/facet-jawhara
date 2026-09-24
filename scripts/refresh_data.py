@@ -142,8 +142,16 @@ def refresh_platform_daily(data):
             "purchases": safe_num(r.get("complete_payment")), "revenue": 0,
         })
 
-    data["campaign_daily"] = rows
-    print(f"  campaign_daily: {len(rows)} rows refreshed")
+    new_rows = rows
+    # Merge, don't replace — this array holds the full campaign-level history. Replacing it
+    # outright with only this call's rows (a rolling last-30-days window) would silently delete
+    # every earlier day's data on every single scheduled run — which is exactly what happened
+    # before this fix: the "available data" window kept shrinking forward run after run instead
+    # of just extending. Only rows for (date, platform) pairs in this fresh pull are replaced;
+    # everything older is preserved.
+    new_dates_platforms = set((r["date"], r["platform"]) for r in new_rows)
+    data["campaign_daily"] = [r for r in data.get("campaign_daily", []) if (r["date"], r["platform"]) not in new_dates_platforms] + new_rows
+    print(f"  campaign_daily: {len(new_rows)} fresh rows merged in ({len(data['campaign_daily'])} total rows now)")
 
 
 def refresh_ga4_daily(data):
